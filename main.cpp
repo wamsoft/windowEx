@@ -866,7 +866,7 @@ public:
 			w = obj.getIntValue(TJS_W("imageWidth"));
 			h = obj.getIntValue(TJS_W("imageHeight"));
 			tjs_int ln = obj.getIntValue(TJS_W("mainImageBufferPitch"));
-			PIX *pw, *pr = reinterpret_cast<unsigned char *>(obj.getIntValue(TJS_W("mainImageBuffer")));
+			PIX *pw, *pr = reinterpret_cast<unsigned char *>(obj.getIntPtrValue(TJS_W("mainImageBuffer")));
 
 			BITMAPINFO info;
 			ZeroMemory(&info, sizeof(info));
