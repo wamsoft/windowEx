@@ -837,7 +837,7 @@ public:
 			return TRUE;
 		}
 		static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-			OverlayBitmap *self = reinterpret_cast<OverlayBitmap*>(::GetWindowLong(hwnd, GWL_USERDATA));
+			OverlayBitmap *self = reinterpret_cast<OverlayBitmap*>(::GetWindowLongPtr(hwnd, GWLP_USERDATA));
 			if (self != NULL && msg == WM_PAINT) {
 				self->onPaint(hwnd);
 				return 0;
@@ -952,7 +952,7 @@ public:
 				overlay = ::CreateWindowExW(WS_EX_TOPMOST, (LPCWSTR)MAKELONG(WindowClass, 0), TJS_W("WindowExOverlayBitmap"),
 											WS_CHILDWINDOW, 0, 0, 1, 1, TVPGetApplicationWindowHandle(), NULL, hinst, NULL);
 				if (!overlay) return false;
-				::SetWindowLong(overlay, GWL_USERDATA, (LONG)this);
+				::SetWindowLongPtr(overlay, GWLP_USERDATA, (LONG_PTR)this);
 			}
 			return true;
 		}
@@ -1694,31 +1694,31 @@ struct PadEx
 		if (hwnd != NULL && (!en || !same)) {
 			if (OrigWndProc != NULL && hwnd != NULL && ::IsWindow(hwnd)) {
 				// WndProc戻し
-				WNDPROC proc =     (WNDPROC)::GetWindowLong(hwnd, GWL_WNDPROC);
-				if (proc == HookWindowProc) ::SetWindowLong(hwnd, GWL_WNDPROC, (LONG)OrigWndProc);
+				WNDPROC proc =     (WNDPROC)::GetWindowLongPtr(hwnd, GWLP_WNDPROC);
+				if (proc == HookWindowProc) ::SetWindowLongPtr(hwnd, GWLP_WNDPROC, (LONG_PTR)OrigWndProc);
 				// UserData戻し
-				LONG ud =              ::GetWindowLong(hwnd, GWL_USERDATA);
-				if ( ud == (LONG)this) ::SetWindowLong(hwnd, GWL_USERDATA, 0);
+				LONG_PTR ud =              ::GetWindowLongPtr(hwnd, GWLP_USERDATA);
+				if ( ud == (LONG_PTR)this) ::SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
 			}
 		}
 		hwnd = now;
 		if (!en) return;
 		if (hwnd == NULL) TVPThrowExceptionMessage(TJS_W("Cannot get Pad window handle."));
 
-		LONG ud = ::GetWindowLong(hwnd, GWL_USERDATA);
-		if (!ud)  ::SetWindowLong(hwnd, GWL_USERDATA, (LONG)this);
+		auto ud = ::GetWindowLongPtr(hwnd, GWLP_USERDATA);
+		if (!ud)  ::SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)this);
 		else if (ud != (LONG)this) TVPThrowExceptionMessage(TJS_W("Cannot set Pad user data."));
 
-		WNDPROC proc = (WNDPROC)::GetWindowLong(hwnd, GWL_WNDPROC);
+		WNDPROC proc = (WNDPROC)::GetWindowLongPtr(hwnd, GWLP_WNDPROC);
 		if (proc != HookWindowProc) {
 			if (OrigWndProc == NULL) OrigWndProc = proc;
 			else if (proc != OrigWndProc) TVPThrowExceptionMessage(TJS_W("Cannot set Pad proc."));
-			::SetWindowLong(hwnd, GWL_WNDPROC, (LONG)HookWindowProc);
+			::SetWindowLongPtr(hwnd, GWLP_WNDPROC, (LONG_PTR)HookWindowProc);
 		}
 	}
 	static LRESULT CALLBACK HookWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 		if (uMsg == WM_SYSCOMMAND) {
-			PadEx *self = (PadEx*)::GetWindowLong(hwnd, GWL_USERDATA);
+			PadEx *self = (PadEx*)::GetWindowLong(hwnd, GWLP_USERDATA);
 			if (self != NULL) {
 				switch (wParam & 0xFFF0) {
 				case SC_CLOSE: self->onClose(); break;
