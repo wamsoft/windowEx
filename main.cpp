@@ -47,7 +47,7 @@ struct WindowEx
 	static HWND GetHWND(iTJSDispatch2 *obj) {
 		tTJSVariant val;
 		obj->PropGet(0, TJS_W("HWND"), 0, &val, obj);
-		return (HWND)(tjs_int)(val);
+		return (HWND)(tjs_int64)(val);
 	}
 
 	// RECTを辞書に保存
@@ -949,7 +949,7 @@ public:
 				if (!WindowClass) return false;
 			}
 			if (!overlay) {
-				overlay = ::CreateWindowExW(WS_EX_TOPMOST, (LPCWSTR)MAKELONG(WindowClass, 0), TJS_W("WindowExOverlayBitmap"),
+				overlay = ::CreateWindowExW(WS_EX_TOPMOST, (LPCWSTR)WindowClass, TJS_W("WindowExOverlayBitmap"),
 											WS_CHILDWINDOW, 0, 0, 1, 1, TVPGetApplicationWindowHandle(), NULL, hinst, NULL);
 				if (!overlay) return false;
 				::SetWindowLongPtr(overlay, GWLP_USERDATA, (LONG_PTR)this);
@@ -1055,7 +1055,7 @@ struct MenuItemEx
 			global->Release();
 		} else mi = obj;
 		mi->PropGet(0, TJS_W("HMENU"), 0, &val, obj);
-		return (HMENU)(tjs_int)(val);
+		return (HMENU)(tjs_int64)(val);
 	}
 	// 親メニューを取得
 	static iTJSDispatch2* GetParentMenu(iTJSDispatch2 *obj) {
@@ -1133,9 +1133,9 @@ struct MenuItemEx
 	tjs_int getBmpUnchecked() const { return getBmpSelect(BMP_UNCHK); }
 	void setBmpUnchecked(tTJSVariant v) { setBmpSelect(v, BMP_UNCHK); }
 
-	tjs_int getBmpSelect(int sel) const {
+	tjs_int64 getBmpSelect(int sel) const {
 		switch (bmptype[sel]) {
-		case BMT_SYS: return (tjs_int)bitmap[sel];
+		case BMT_SYS: return (tjs_int64)bitmap[sel];
 		case BMT_BMP: return -1;
 		default:      return 0;
 		}
@@ -1335,7 +1335,7 @@ public:
 		}
 		return !!::InsertMenuItem(menu, pos, insPos, &mi);
 	}
-	static HMENU CreateMenuList(HMENU menu, iTJSDispatch2 *obj, WORD &curid, WORD idmv, iTJSDispatch2 *items, DWORD sysdt) {
+	static HMENU CreateMenuList(HMENU menu, iTJSDispatch2 *obj, WORD &curid, WORD idmv, iTJSDispatch2 *items, ULONG_PTR sysdt) {
 		HMENU       ret = NULL;
 		tjs_int     count = 0;
 		tTJSVariant val;
@@ -1354,7 +1354,7 @@ public:
 		if (!created && menu == NULL) ::DestroyMenu(ret);
 		return created ? ret : NULL;
 	}
-	static void RemoveMenuList(HMENU menu, DWORD sysdt) {
+	static void RemoveMenuList(HMENU menu, ULONG_PTR sysdt) {
 		UINT cnt = ::GetMenuItemCount(menu);
 		MENUITEMINFO mi;
 		ZeroMemory(&mi, sizeof(mi));
@@ -1419,16 +1419,16 @@ NCB_GET_INSTANCE_HOOK(MenuItemEx)
 };
 NCB_ATTACH_CLASS_WITH_HOOK(MenuItemEx, MenuItem)
 {
-	Variant(TJS_W("biSystem"),           (tjs_int)HBMMENU_SYSTEM);
-	Variant(TJS_W("biRestore"),          (tjs_int)HBMMENU_MBAR_RESTORE);
-	Variant(TJS_W("biMinimize"),         (tjs_int)HBMMENU_MBAR_MINIMIZE);
-	Variant(TJS_W("biClose"),            (tjs_int)HBMMENU_MBAR_CLOSE);
-	Variant(TJS_W("biCloseDisabled"),    (tjs_int)HBMMENU_MBAR_CLOSE_D);
-	Variant(TJS_W("biMinimizeDisabled"), (tjs_int)HBMMENU_MBAR_MINIMIZE_D);
-	Variant(TJS_W("biPopupClose"),       (tjs_int)HBMMENU_POPUP_CLOSE);
-	Variant(TJS_W("biPopupRestore"),     (tjs_int)HBMMENU_POPUP_RESTORE);
-	Variant(TJS_W("biPopupMaximize"),    (tjs_int)HBMMENU_POPUP_MAXIMIZE);
-	Variant(TJS_W("biPopupMinimize"),    (tjs_int)HBMMENU_POPUP_MINIMIZE);
+	Variant(TJS_W("biSystem"),           (tjs_int64)HBMMENU_SYSTEM);
+	Variant(TJS_W("biRestore"),          (tjs_int64)HBMMENU_MBAR_RESTORE);
+	Variant(TJS_W("biMinimize"),         (tjs_int64)HBMMENU_MBAR_MINIMIZE);
+	Variant(TJS_W("biClose"),            (tjs_int64)HBMMENU_MBAR_CLOSE);
+	Variant(TJS_W("biCloseDisabled"),    (tjs_int64)HBMMENU_MBAR_CLOSE_D);
+	Variant(TJS_W("biMinimizeDisabled"), (tjs_int64)HBMMENU_MBAR_MINIMIZE_D);
+	Variant(TJS_W("biPopupClose"),       (tjs_int64)HBMMENU_POPUP_CLOSE);
+	Variant(TJS_W("biPopupRestore"),     (tjs_int64)HBMMENU_POPUP_RESTORE);
+	Variant(TJS_W("biPopupMaximize"),    (tjs_int64)HBMMENU_POPUP_MAXIMIZE);
+	Variant(TJS_W("biPopupMinimize"),    (tjs_int64)HBMMENU_POPUP_MINIMIZE);
 
 	Property(TJS_W("rightJustify"), &Class::getRightJustify, &Class::setRightJustify);
 	Property(TJS_W("bmpItem"),      &Class::getBmpItem,      &Class::setBmpItem     );
@@ -1463,7 +1463,7 @@ void WindowEx::setMenuItemID(iTJSDispatch2* obj, UINT id, bool set) {
 
 void WindowEx::resetSystemMenu() {
 	if (sysMenu != NULL && sysMenuModified != NULL) {
-		MenuItemEx::RemoveMenuList(sysMenu, (DWORD)sysMenuModified);
+		MenuItemEx::RemoveMenuList(sysMenu, (ULONG_PTR)sysMenuModified);
 	}
 	if (sysMenuModMap != NULL) sysMenuModMap->Release();
 	sysMenuModMap = NULL;
@@ -1474,7 +1474,7 @@ void WindowEx::modifySystemMenu() {
 	sysMenuModMap = TJSCreateDictionaryObject();
 	WORD id = 0xF000-1;
 	if (sysMenu == NULL) sysMenu = ::GetSystemMenu(cachedHWND, FALSE);
-	sysMenu = MenuItemEx::CreateMenuList(sysMenu, sysMenuModified, id, -1, sysMenuModMap, (DWORD)sysMenuModified);
+	sysMenu = MenuItemEx::CreateMenuList(sysMenu, sysMenuModified, id, -1, sysMenuModMap, (ULONG_PTR)sysMenuModified);
 	if (sysMenu == NULL) {
 		::GetSystemMenu(cachedHWND, TRUE);
 		sysMenuModMap->Release();
@@ -1707,7 +1707,7 @@ struct PadEx
 
 		auto ud = ::GetWindowLongPtr(hwnd, GWLP_USERDATA);
 		if (!ud)  ::SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)this);
-		else if (ud != (LONG)this) TVPThrowExceptionMessage(TJS_W("Cannot set Pad user data."));
+		else if (ud != (ULONG_PTR)this) TVPThrowExceptionMessage(TJS_W("Cannot set Pad user data."));
 
 		WNDPROC proc = (WNDPROC)::GetWindowLongPtr(hwnd, GWLP_WNDPROC);
 		if (proc != HookWindowProc) {
@@ -1718,7 +1718,7 @@ struct PadEx
 	}
 	static LRESULT CALLBACK HookWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 		if (uMsg == WM_SYSCOMMAND) {
-			PadEx *self = (PadEx*)::GetWindowLong(hwnd, GWLP_USERDATA);
+			PadEx *self = (PadEx*)::GetWindowLongPtr(hwnd, GWLP_USERDATA);
 			if (self != NULL) {
 				switch (wParam & 0xFFF0) {
 				case SC_CLOSE: self->onClose(); break;
