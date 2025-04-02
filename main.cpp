@@ -1916,6 +1916,34 @@ struct System
 		}
 		return TJS_S_OK;
 	}
+
+	static tjs_error TJS_INTF_METHOD setClipCursor(tTJSVariant *r, tjs_int n, tTJSVariant **p, iTJSDispatch2 *obj) {
+
+		if (n < 1 || p[0]->Type() == tvtVoid) {
+			::ClipCursor(NULL);
+			return TJS_S_OK;
+		}
+		iTJSDispatch2 *win = p[0]->AsObjectNoAddRef();
+		if (win && win->IsInstanceOf(0, 0, 0, TJS_W("Window"), win)) {
+			HWND hwnd = WindowEx::GetHWND(win);
+			RECT rect;
+			POINT origin = {0, 0};
+			::GetClientRect(hwnd, &rect);
+			::ClientToScreen(hwnd, &origin);
+			rect.left += origin.x;
+			rect.top += origin.y;
+			rect.right += origin.x;
+			rect.bottom += origin.y;
+			::ClipCursor(&rect);
+		} else if (p[0]->Type() == tvtObject) {
+			ncbPropAccessor r(*(p[0]));
+			RECT rect;
+			WindowEx::GetRect(&rect, r);
+			::ClipCursor(&rect);
+		}
+		return TJS_S_OK;
+	}
+
 	// System.getSystemMetrics
 	static tjs_error TJS_INTF_METHOD getSystemMetrics(tTJSVariant *r, tjs_int n, tTJSVariant **p, iTJSDispatch2 *objthis) {
 		if (n < 1) return TJS_E_BADPARAMCOUNT;
@@ -2089,6 +2117,7 @@ NCB_ATTACH_FUNCTION(getDisplayMonitors, System, System::getDisplayMonitors);
 NCB_ATTACH_FUNCTION(getMonitorInfo,     System, System::getMonitorInfo);
 NCB_ATTACH_FUNCTION(getCursorPos,       System, System::getCursorPos);
 NCB_ATTACH_FUNCTION(setCursorPos,       System, System::setCursorPos);
+NCB_ATTACH_FUNCTION(setClipCursor,      System, System::setClipCursor);
 NCB_ATTACH_FUNCTION(getSystemMetrics,   System, System::getSystemMetrics);
 NCB_ATTACH_FUNCTION(readEnvValue,       System, System::readEnvValue);
 NCB_ATTACH_FUNCTION(expandEnvString,    System, System::expandEnvString);

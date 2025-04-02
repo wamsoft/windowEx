@@ -505,6 +505,11 @@ class System
 	function getCursorPos();
 
 	/**
+	 * カーソル位置クリップ処理
+	 */
+	function setClipCursor(win_or_rect);
+
+	/**
 	 * システムメトリクス情報を取得
 	 * @param index SM_* の「*」部分の文字列（ただし大文字小文字は無関係）
 	 * @return メトリクス値（indexにより内容が異なる）
