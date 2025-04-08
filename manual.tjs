@@ -56,6 +56,14 @@ class Window {
 	function setWindowIcon(file, withapp);
 
 	/**
+	 * ウィンドウの角の形状を変更する
+	 * @param type DWMWCP_* の値 (0=DEFAULT, 1=DONOTROUND, 2=ROUND, 3=ROUNDSMALL)
+	 * @return 成功したらtrue
+	 * @description ※ Windows 11 Build 22000 以降で使用可能
+	 */
+	function setWindowCornerPreference(type = 0);
+
+	/**
 	 * クライアント・ウィンドウ領域，非最大化通常表示の領域の取得
 	 * @return %[ x, y, w, h ] または void(取得失敗時)
 	 * @description ※ innerSunken枠分はクライアント領域に含まれるので注意
@@ -66,6 +74,14 @@ class Window {
 	function getWindowRect();
 	// 非最大化通常表示領域(@param nofix true:ワークエリア補正を行わない)
 	function getNormalRect(nofix=false);
+
+	/**
+	 * クライアント領域の設定
+	 * @param rect %[ x,y,w,h ]
+	 * @param x,y,w,hのパラメータがvoidの場合は現在の値を使用
+	 */
+	function setClientRect(rect);
+
 
 	/**
 	 * ウィンドウの Zオーダーを変更する
@@ -85,6 +101,21 @@ class Window {
 	/// alias method
 	function sendToBack() { bringTo("bottom"); }
 
+	/**
+	 * IMEを再設定する(吉里吉里Z専用)
+	 * @return 成功した場合はtrue
+	 * @description
+	 * 実行環境が 吉里吉里Z の場合にTVP_WM_ACQUIREIMECONTROLをポストする
+	 */
+	function acquireImeControl();
+	/**
+	 * IMEコンテキストを再設定する
+	 * @param defval true:IACE_DEFAULT, false:NULL
+	 * @return 成功した場合はtrue
+	 * @description
+	 * imDisableが再実装された場合や複数ウインドウでテキスト入力を使う場合に吉里吉里Z本体側(ImeControl.h)の設定と競合する可能性あり
+	 */
+	function resetImeContext(defval=true);
 
 	/**
 	 * 拡張イベントを有効にする
@@ -162,10 +193,10 @@ class Window {
 	/**
 	 * ■拡張イベント：サイズ変更中
 	 * @param rect %[ x, y, w, h, type ] 変更中サイズ（ウィンドウ座標）
-	 * @param rect.type ウィンドウのどこをつかんでサイズを変更しているか 1〜8
+	 * @param rect.type ウィンドウのどこをつかんでサイズを変更しているか 1～8
 	 *                  +1:左側, +2:右側, +3:上側, +6:下側  の組み合わせ（3進数的表現）
 	 *                         4 3 5
-	 *                  配置： 1   3
+	 *                  配置： 1   2
 	 *                         7 6 8
 	 * @return true を返すと rect の変更を反映（位置・サイズを強制指定）
 	 *         この場合，つかんだ位置(rect.type)に応じてうまく書き換え内容を調整しないと
@@ -205,6 +236,12 @@ class Window {
 	function onDisplayChanged();
 
 	/**
+	 * ■拡張イベント：ウィンドウのDPI変更通知
+	 * @description DPIの設定を変えたりDPI値の異なるモニタ間を移動した場合に通知
+	 */
+	function onDPIChanged();
+
+	/**
 	 * ■拡張イベント：メニュー処理の開始・終了通知
 	 * @description ウィンドウのメニュー処理（クリックやF10を押した場合など）の開始と終了の通知イベント
 	 * WM_ENTERMENULOOP / WM_EXITMENULOOP 通知のコールバック
@@ -221,6 +258,36 @@ class Window {
 	 */
 	function onScreenSave();
 	function onMonitorPower(mode);
+
+	/**
+	 * ■拡張イベント：デバイス追加・リムーブ通知
+	 * @param arrival trueならデバイスが追加された, falseなら外された
+	 * ※registerExEvent()が呼んでいてかつregisterDeviceChange()を呼んでおく必要があるので注意
+	 */
+	function onDeviceChanged(arrival);
+
+	/**
+	 * onDeviceChanged拡張イベントを有効にする
+	 * @param guid GUIDを示したoctet値（省略時HIDデバイスクラス）
+	 * ※登録できるGUIDはウィンドウにつき1つまでなので注意
+	 */
+	function registerDeviceChange(guid = GUID_DEVINTERFACE_HID);
+
+	/**
+	 * ■拡張イベント：ホットキーの入力
+	 * @param id  registerHotKeyで登録したID
+	 * @param mod モディファイアキー(ssShift, ssAlt, ssCtrl 等の組み合わせ）
+	 */
+	function onHotKeyPressed(id, mod);
+
+	/**
+	 * ホットキーを登録する
+	 * @param id  登録するID (※0x0000～0xBFFFまで）
+	 * @param vk  登録する仮想キー(VK_*), 省略時もしくは0の場合は登録解除
+	 * @param mod モディファイアキー(ssShift, ssAlt, ssCtrl 等の組み合わせ）
+	 * @return 登録出来たらtrue
+	 */
+	function registerHotKey(id, key, mod);
 
 	/**
 	 * リサイズの抑制
@@ -496,6 +563,9 @@ class System
 	// 指定ウィンドウの範囲にもっとも多く交わるモニタを返す
 	function getMonitorInfo(near, window);     
 
+	// SetThreadDpiAwarenessContext を呼び出す
+	function setDpiAwareness(context);
+
 	/**
 	 * マウスカーソルのスクリーン座標を設定・取得
 	 * @param  set時：   x, y スクリーン座標
@@ -532,7 +602,7 @@ class System
 	function readEnvValue(name);
 
 	/**
-	 * 文字列内の「%〜%」を環境変数で展開
+	 * 文字列内の「%～%」を環境変数で展開
 	 * @param text 展開する文字列
 	 * @return 展開後文字列
 	 */
@@ -558,6 +628,42 @@ class System
 	 */
 	function breathe();
 	function isBreathing();
+
+
+	/**
+	 * findWindoeEx のラッパ
+	 * @param winname ウインドウ名
+	 * @param clsname クラス名
+	 * @param parwin  親ウインドウ（Windowクラス指定かHWND数値）
+	 * @param childafter 検索開始位置ウインドウ（〃）
+	 * @return 成功した場合はHWND数値
+	 */
+	function findWindowEx(winname=void, clsname=void, parwin=void, childafter=void);
+
+	/**
+	 * {Get,Set}ClassLongPtr のラッパ
+	 * @param win 対象ウインドウ（Windowクラス指定かHWND数値）
+	 * @param key 対象インデックス 現状の実装では {cursor,icon,iconsm,brbackground} の文字列いずれか
+	 * @param setvalue_or_getasvoid 取得する場合はvoid, 数値指定の場合はset （ただし key=brbackground の場合は {black,white,gray,ltgray,dkgray} のStockブラシを指定可）
+	 * @return 成功した場合は現在（もしくは直前）のLONG_PTR数値／失敗時はvoid
+	 */
+	function classLongPtr(win, key, setvalue_or_getasvoid=void);
+
+	/**
+	 * LoadCursorのラッパ
+	 * @param idc_or_res 数値>=0の場合はMAKEINTRESOURCE, 数値<0の場合はcrXXXX，文字列の場合はリソース名
+	 * @param hmodule リソース対象のHMODULE値
+	 * @return HCURSOR数値
+	 */
+	function loadCursor(idc_or_res, hmodule=void);
+
+	/**
+	 * MapVirtualKeyのラッパ
+	 * @param code 仮想キーコードもしくはスキャンコード
+	 * @param maptype MAPVK_*値
+	 * @return keycode
+	 */
+	function mapVirtualKey(code, maptype);
 }
 
 /**
