@@ -2,6 +2,8 @@
 #include <dbt.h>
 #include "ncbind.hpp"
 
+#pragma comment( lib, "imm32.lib")
+
 // ウィンドウクラス名取得用のバッファサイズ
 #define CLASSNAME_MAX 1024
 
