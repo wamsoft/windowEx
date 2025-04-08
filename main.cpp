@@ -1,8 +1,21 @@
 #include <windows.h>
+#include <dbt.h>
 #include "ncbind.hpp"
 
 // ウィンドウクラス名取得用のバッファサイズ
 #define CLASSNAME_MAX 1024
+
+#ifndef TVP_SS_WIN
+#define TVP_SS_WIN 0x100 // [XXX]ssWinはないので暫定で
+#endif
+#ifndef MOD_NOREPEAT
+#define MOD_NOREPEAT 0x4000 // RegisterHotKey用（Win8以降）
+#endif
+
+// 吉里吉里ZのacquireImeControl用メッセージ
+#ifndef TVP_WM_ACQUIREIMECONTROL
+#define TVP_WM_ACQUIREIMECONTROL    (WM_USER + 5)
+#endif
 
 // イベント名一覧
 #define EXEV_MINIMIZE  TJS_W("onMinimize")
@@ -15,7 +28,9 @@
 #define EXEV_MOVE      TJS_W("onMove")
 #define EXEV_MVSZBEGIN TJS_W("onMoveSizeBegin")
 #define EXEV_MVSZEND   TJS_W("onMoveSizeEnd")
+#define EXEV_DPICHANGE TJS_W("onDPIChanged")
 #define EXEV_DISPCHG   TJS_W("onDisplayChanged")
+#define EXEV_DEVCHG    TJS_W("onDeviceChanged")
 #define EXEV_ENTERMENU TJS_W("onEnterMenuLoop")
 #define EXEV_EXITMENU  TJS_W("onExitMenuLoop")
 #define EXEV_ACTIVATE  TJS_W("onActivateChanged")
@@ -28,8 +43,42 @@
 #define EXEV_SYSMENU   TJS_W("onExSystemMenuSelected")
 #define EXEV_KEYMENU   TJS_W("onStartKeyMenu")
 #define EXEV_ACCELKEY  TJS_W("onAccelKeyMenu")
+#define EXEV_HOTKEY    TJS_W("onHotKeyPressed")
 #define EXEV_NCMSEV    TJS_W("onNonCapMouseEvent")
 #define EXEV_MSGHOOK   TJS_W("onWindowsMessageHook")
+
+
+// 吉里吉里2判定フラグ
+static bool IsKirikiri2 = false;
+static bool GetGlobalRecursive(const ttstr &name, tTJSVariant &result) {
+	// globalから . 区切りでデータを取得
+	result.Clear();
+	iTJSDispatch2 *global = TVPGetScriptDispatch();
+	if (!global) return false;
+	tTJSVariantClosure clo(global, global);
+	global->Release(); // NoAddRef.
+	const tjs_char *p = name.c_str();
+	const tjs_char *r = p;
+	while (*p != 0) {
+		while (*r && *r != TJS_W('.')) r++;
+		result.Clear();
+		ttstr div(p, r-p);
+		if (div.IsEmpty() ||
+			TJS_FAILED(clo.PropGet(0, div.c_str(), NULL, &result, NULL))) return false;
+		if (*r) {
+			if (result.Type() != tvtObject) return false;
+			clo = result.AsObjectNoAddRef();
+			++r;
+		}
+		p = r;
+	}
+	return true;
+}
+static bool CheckKirikiri2() {
+	// 吉里吉里2 かどうかを Window.PassThroughDrawDevice の有無で判定する
+	tTJSVariant dd;
+	return GetGlobalRecursive(TJS_W("Window.PassThroughDrawDevice"), dd) && (dd.Type() == tvtObject);
+}
 
 ////////////////////////////////////////////////////////////////
 
@@ -77,6 +126,46 @@ struct WindowEx
 		::PostMessage(GetHWND(objthis), WM_SYSCOMMAND, wp, lp);
 		return TJS_S_OK;
 	}
+
+	// dwmapi.dll の動的リンク
+	static FARPROC GetDwmAPI(LPCSTR method) {
+		static HMODULE hmod = NULL;
+		const HMODULE invalid = (HMODULE)INVALID_HANDLE_VALUE;
+		if (!method) {
+			if (hmod && hmod != invalid) ::FreeLibrary(hmod);
+			hmod = NULL;
+		} else if (hmod != invalid) {
+			if (!hmod) {
+				hmod = ::LoadLibraryW(L"dwmapi.dll");
+				if (!hmod || hmod == invalid) {
+					TVPAddImportantLog(TJS_W("dwmapi.dll load failed."));
+					hmod = invalid;
+				}
+			}
+			if (hmod && hmod != invalid) {
+				FARPROC proc = ::GetProcAddress(hmod, method);
+				if (!proc) {
+					ttstr mes(TJS_W("dwmapi.dll: "));
+					mes += ttstr(method);
+					mes += TJS_W(" not found.");
+					TVPAddImportantLog(mes.c_str());
+				}
+				return proc;
+			}
+		}
+		return NULL;
+	}
+	template <typename T>
+	static HRESULT SetDwmWindowAttribute(HWND hwnd, DWORD dwAttribute, const T &tAttribute) {
+		return SetDwmWindowAttribute(hwnd, dwAttribute, (LPCVOID)&tAttribute, sizeof(T));
+	}
+	static HRESULT SetDwmWindowAttribute(HWND hwnd, DWORD dwAttribute, LPCVOID pvAttribute, DWORD cbAttribute) {
+		typedef HRESULT (WINAPI *DwmSetWindowAttributeT)(HWND hwnd, DWORD dwAttribute, LPCVOID pvAttribute, DWORD cbAttribute);
+		static DwmSetWindowAttributeT proc = (DwmSetWindowAttributeT)WindowEx::GetDwmAPI("DwmSetWindowAttribute");
+		return proc ? proc(hwnd, dwAttribute, pvAttribute, cbAttribute) : E_NOTIMPL;
+	}
+
+	static inline void FreeDwmAPI() { GetDwmAPI(NULL); }
 
 	//--------------------------------------------------------------
 	// クラス追加メソッド(RawCallback形式)
@@ -132,7 +221,20 @@ struct WindowEx
 	HICON getCurrentIcon() const {
 		return externalIcon ? externalIcon : (::LoadIcon(GetModuleHandle(0), IDI_APPLICATION));
 	}
-	
+
+	// setWindowCornerPreference
+	static tjs_error TJS_INTF_METHOD setWindowCornerPreference(tTJSVariant *r, tjs_int n, tTJSVariant **p, iTJSDispatch2 *obj) {
+		HWND hwnd = GetHWND(obj);
+		if (hwnd != NULL) {
+			DWORD val = (n > 0) ? (DWORD)p[0]->AsInteger() : 0;
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#endif
+			HRESULT hr = SetDwmWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, val);
+			if (r) *r = (tjs_int)(SUCCEEDED(hr));
+		}
+		return TJS_S_OK;
+	}
 
 	// getWindowRect
 	static tjs_error TJS_INTF_METHOD getWindowRect(tTJSVariant *r, tjs_int n, tTJSVariant **p, iTJSDispatch2 *obj) {
@@ -149,17 +251,47 @@ struct WindowEx
 	// getClientRect
 	static tjs_error TJS_INTF_METHOD getClientRect(tTJSVariant *r, tjs_int n, tTJSVariant **p, iTJSDispatch2 *obj) {
 		RECT rect;
-		POINT zero = { 0, 0 };
-		HWND hwnd = GetHWND(obj);
 		if (r) r->Clear();
-		if (hwnd != NULL && ::GetClientRect(hwnd, &rect)) {
-			::ClientToScreen(hwnd, &zero);
-			rect.left   += zero.x; rect.top    += zero.y;
-			rect.right  += zero.x; rect.bottom += zero.y;
+		if (_getClientRect(GetHWND(obj), rect)) {
 			ncbDictionaryAccessor dict;
 			if (SetRect(dict, &rect) && r) *r = tTJSVariant(dict, dict);
 		}
 		return TJS_S_OK;
+	}
+
+	// setClientRect
+	static tjs_error TJS_INTF_METHOD setClientRect(tTJSVariant *r, tjs_int n, tTJSVariant **p, iTJSDispatch2 *obj) {
+		if (n < 1) return TJS_E_BADPARAMCOUNT;
+		if (p[0]->Type() != tvtObject) return TJS_E_INVALIDPARAM;
+
+		HWND hwnd = GetHWND(obj);
+		RECT rect, border;
+		if (r) r->Clear();
+		if (_getClientRect(hwnd, rect) && ::GetWindowRect(hwnd, &border)) {
+			int x, y, w, h;
+			ncbPropAccessor dict(*p[0]);
+
+			x = dict.getIntValue(TJS_W("x"), rect.left) + (border.left - rect.left);
+			y = dict.getIntValue(TJS_W("y"), rect.top)  + (border.top  - rect.top);
+			w = dict.getIntValue(TJS_W("w"), rect.right  - rect.left) + ((border.right -border.left) - (rect.right -rect.left));
+			h = dict.getIntValue(TJS_W("h"), rect.bottom - rect.top ) + ((border.bottom-border.top)  - (rect.bottom-rect.top));
+
+			bool succeeded = ::SetWindowPos(hwnd, NULL, x, y, w, h, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOOWNERZORDER | SWP_NOZORDER) != 0;
+			if (r) *r = succeeded;
+		}
+		return TJS_S_OK;
+	}
+
+	// util for getClientRect/setClientRect
+	static bool _getClientRect(HWND hwnd, RECT &rect) {
+		if (hwnd != NULL && ::GetClientRect(hwnd, &rect)) {
+			POINT zero = { 0, 0 };
+			::ClientToScreen(hwnd, &zero);
+			rect.left   += zero.x; rect.top    += zero.y;
+			rect.right  += zero.x; rect.bottom += zero.y;
+			return true;
+		}
+		return false;
 	}
 
 	// getNormalRect
@@ -404,6 +536,101 @@ struct WindowEx
 		return TJS_S_OK;
 	}
 
+	// 
+	static tjs_error TJS_INTF_METHOD registerDeviceChange(tTJSVariant *r, tjs_int n, tTJSVariant **p, iTJSDispatch2 *obj) {
+		WindowEx *self = GetInstance(obj);
+		if (self == NULL) return TJS_E_ACCESSDENYED;
+		HWND hwnd = GetHWND(obj);
+		if (hwnd != NULL) {
+			if (self->deviceNotify) ::UnregisterDeviceNotification(self->deviceNotify); // unregister old notify
+
+			static const GUID HID = { 0x4D1E55B2, 0xF16F, 0x11CF, { 0x88, 0xCB, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30 } };
+			DEV_BROADCAST_DEVICEINTERFACE_W filter;
+			::ZeroMemory(&filter, sizeof(filter));
+			filter.dbcc_size = sizeof(filter);
+			filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+			filter.dbcc_classguid  = HID;
+			if (n > 0 && p[0]->Type() == tvtOctet) {
+				tTJSVariantOctet *oct = p[0]->AsOctetNoAddRef();
+				if (oct->GetLength() == 16) {
+					// [TODO][XXX] not checked
+					GUID *guid = &filter.dbcc_classguid;
+					const tjs_uint8 *data = oct->GetData();
+					guid->Data1 = data[3] | (data[2]<<8) | (data[1]<<16) | (data[0]<<24);
+					guid->Data2 = data[5] | (data[4]<<8);
+					guid->Data3 = data[7] | (data[6]<<8);
+					guid->Data4[0] = data[8];
+					guid->Data4[1] = data[9];
+					guid->Data4[2] = data[10];
+					guid->Data4[3] = data[11];
+					guid->Data4[4] = data[12];
+					guid->Data4[5] = data[13];
+					guid->Data4[6] = data[14];
+					guid->Data4[7] = data[15];
+				} else {
+					return TJS_E_INVALIDPARAM;
+				}
+			}
+			self->deviceNotify = ::RegisterDeviceNotificationW(hwnd, &filter, DEVICE_NOTIFY_WINDOW_HANDLE);
+		}
+		return TJS_S_OK;
+	}
+
+	static tjs_error TJS_INTF_METHOD registerHotKey(tTJSVariant *r, tjs_int n, tTJSVariant **p, iTJSDispatch2 *obj) {
+		if (n < 1) return TJS_E_BADPARAMCOUNT;
+		WindowEx *self = GetInstance(obj);
+		if (self == NULL) return TJS_E_ACCESSDENYED;
+		HWND hwnd = GetHWND(obj);
+		if (hwnd != NULL) {
+			bool result;
+			int id = (tjs_int)(*p[0]);
+			if (id < 0 || id >= 0xC000) return TJS_E_INVALIDPARAM;
+			UINT vk = (n >= 2) ? (UINT)(p[1]->AsInteger()) : 0;
+			if (vk > 0) {
+				UINT mod = 0;
+				if (n >= 3) {
+					tjs_int ss = (tjs_int)(*p[2]);
+					if  (ss & TVP_SS_ALT)     mod |= MOD_ALT;
+					if  (ss & TVP_SS_CTRL)    mod |= MOD_CONTROL;
+					if  (ss & TVP_SS_SHIFT)   mod |= MOD_SHIFT;
+					if  (ss & TVP_SS_WIN)     mod |= MOD_WIN;
+					if(!(ss & TVP_SS_REPEAT)) mod |= MOD_NOREPEAT;
+				}
+				result = (::RegisterHotKey(hwnd, id, mod, vk) != FALSE);
+			} else {
+				result = (::UnregisterHotKey(hwnd, id) != FALSE);
+			}
+			if (r) *r = result;
+		} else {
+			if (r) r->Clear();
+		}
+		return TJS_S_OK;
+	}
+
+	static tjs_error TJS_INTF_METHOD acquireImeControl(tTJSVariant *r, tjs_int n, tTJSVariant **p, iTJSDispatch2 *obj) {
+		if (!IsKirikiri2) {
+			HWND hwnd = GetHWND(obj);
+			if (hwnd) {
+				::PostMessage(hwnd, TVP_WM_ACQUIREIMECONTROL, 0, 0);
+				if    (r) *r = (tjs_int)1;
+			} else if (r) *r = (tjs_int)0;
+		} else     if (r)  r->Clear();
+		return TJS_S_OK;
+	}
+	static tjs_error TJS_INTF_METHOD resetImeContext(tTJSVariant *r, tjs_int n, tTJSVariant **p, iTJSDispatch2 *obj) {
+		HWND hwnd = GetHWND(obj);
+		if (hwnd) {
+			BOOL result = FALSE;
+			if (n > 0 && p[0]->Type() != tvtVoid && !p[0]->operator bool()) {
+				result = ::ImmAssociateContextEx(hwnd, NULL, IACE_IGNORENOCONTEXT);
+			} else {
+				result = ::ImmAssociateContextEx(hwnd, NULL, IACE_DEFAULT);
+			}
+			if (r) *r = (tjs_int)(result ? 1 : 0);
+		}
+		return TJS_S_OK;
+	}
+
 	//--------------------------------------------------------------
 	// 拡張イベント用
 
@@ -534,6 +761,7 @@ struct WindowEx
 			break;
 		case WM_ENTERSIZEMOVE: callback(EXEV_MVSZBEGIN); break;
 		case WM_EXITSIZEMOVE:  callback(EXEV_MVSZEND);   break;
+		case /*WM_DPICHANGED*/0x02E0:    callback(EXEV_DPICHANGE, (int)LOWORD(mes->WParam), (int)HIWORD(mes->WParam)); break;
 		case WM_SIZING: if (hasResizing) callback(EXEV_RESIZING, (RECT*)mes->LParam, mes->WParam); break;
 		case WM_MOVING: if (hasMoving)   callback(EXEV_MOVING,   (RECT*)mes->LParam); break;
 		case WM_MOVE:   if (hasMove)     callback(EXEV_MOVE, (int)LOWORD(mes->LParam), (int)HIWORD(mes->LParam)); break;
@@ -600,6 +828,29 @@ struct WindowEx
 			callback(EXEV_DISPCHG);
 			break;
 
+			// デバイス変更通知（要registerDeviceChange）
+		case WM_DEVICECHANGE:
+			if((mes->WParam == DBT_DEVICEARRIVAL ||
+				mes->WParam == DBT_DEVICEREMOVECOMPLETE) &&
+			   ((DEV_BROADCAST_HDR*)mes->LParam)->dbch_devicetype == DBT_DEVTYP_DEVICEINTERFACE)
+			{
+				tTJSVariant v((mes->WParam == DBT_DEVICEARRIVAL) ? 1 : 0);
+				callback(EXEV_DEVCHG, &v);
+			}
+			return true; //break;
+
+		case WM_HOTKEY:
+			{
+				WORD mod = LOWORD(mes->LParam);
+				int id = (int)mes->WParam, ss = 0;
+				if (mod & MOD_ALT)     ss |= TVP_SS_ALT;   // ssAlt
+				if (mod & MOD_CONTROL) ss |= TVP_SS_CTRL;  // ssCtrl
+				if (mod & MOD_SHIFT)   ss |= TVP_SS_SHIFT; // ssShift
+				if (mod & MOD_WIN)     ss |= TVP_SS_WIN;
+				if (callback(EXEV_HOTKEY, id, ss)) return true;
+			}
+			break;
+
 		case WM_ACTIVATE:
 			return callback(EXEV_ACTIVATE, (int)(mes->WParam & 0xFFFF), (int)((mes->WParam >> 16) & 0xFFFF));
 		}
@@ -636,6 +887,7 @@ struct WindowEx
 			cachedHWND(0),
 			sysMenu(0),
 			externalIcon(0),
+			deviceNotify(0),
 			hasResizing(false),
 			hasMoving(false),
 			hasMove(false),
@@ -651,6 +903,7 @@ struct WindowEx
 		}
 
 	~WindowEx() {
+		if (deviceNotify) ::UnregisterDeviceNotification(deviceNotify);
 		if (menuex)          menuex         ->Release();
 		if (sysMenuModified) sysMenuModified->Release();
 		if (externalIcon) ::DestroyIcon(externalIcon);
@@ -810,6 +1063,7 @@ private:
 	HWND cachedHWND;
 	HMENU sysMenu;
 	HICON externalIcon;
+	HDEVNOTIFY deviceNotify;
 	bool hasResizing, hasMoving, hasMove, hasNcMsMove; //< メソッドが存在するかフラグ
 	bool disableResize; //< サイズ変更禁止
 	bool disableMove; //< ウィンドウ移動禁止
@@ -1019,6 +1273,7 @@ NCB_ATTACH_CLASS_WITH_HOOK(WindowEx, Window)
 	RawCallback(TJS_W("setWindowIcon"),       &Class::setWindowIcon,     0);
 	RawCallback(TJS_W("getWindowRect"),       &Class::getWindowRect,     0);
 	RawCallback(TJS_W("getClientRect"),       &Class::getClientRect,     0);
+	RawCallback(TJS_W("setClientRect"),       &Class::setClientRect,     0);
 	RawCallback(TJS_W("getNormalRect"),       &Class::getNormalRect,     0);
 	RawCallback(TJS_W("disableResize"),       &Class::getDisableResize,  &Class::setDisableResize, 0);
 	RawCallback(TJS_W("disableMove"),         &Class::getDisableMove,    &Class::setDisableMove, 0);
@@ -1031,6 +1286,11 @@ NCB_ATTACH_CLASS_WITH_HOOK(WindowEx, Window)
 	RawCallback(TJS_W("setMessageHook"),      &Class::setMessageHook,    0);
 	RawCallback(TJS_W("bringTo"),             &Class::bringTo,           0);
 	RawCallback(TJS_W("sendToBack"),          &Class::sendToBack,        0);
+	RawCallback(TJS_W("registerDeviceChange"),&Class::registerDeviceChange, 0);
+	RawCallback(TJS_W("registerHotKey"),      &Class::registerHotKey, 0);
+	RawCallback(TJS_W("acquireImeControl"),   &Class::acquireImeControl, 0);
+	RawCallback(TJS_W("resetImeContext"),     &Class::resetImeContext, 0);
+	RawCallback(TJS_W("setWindowCornerPreference"), &Class::setWindowCornerPreference, 0);
 
 	Method(     TJS_W("registerExEvent"),     &Class::checkExEvents);
 	Method(     TJS_W("getNotificationNum"),  &Class::getWindowNotificationNum);
@@ -2072,36 +2332,131 @@ struct System
 	}
 
 	static bool setIconicPreview(bool en) {
-		static bool lastFailed = false;
-		if (lastFailed) return false;
-
-		HMODULE hmod = ::LoadLibraryW(L"dwmapi.dll");
-
-		typedef HRESULT (WINAPI *DwmSetWindowAttributeT)(HWND hwnd, DWORD dwAttribute, LPCVOID pvAttribute, DWORD cbAttribute);
-		DwmSetWindowAttributeT proc = 0;
-		if (!hmod) TVPAddImportantLog(TJS_W("dwmapi.dll load failed."));
-		else {
-			proc = (DwmSetWindowAttributeT)::GetProcAddress(hmod, "DwmSetWindowAttribute");
-			if (!proc) TVPAddImportantLog(TJS_W("dwmapi.dll: DwmSetWindowAttribute not found."));
-		}
-		if (!proc) {
-			lastFailed = true;
-			return false;
-		}
-
 		BOOL val = en ? TRUE : FALSE;
 		HWND app = TVPGetApplicationWindowHandle();
 #ifndef DWMWA_FORCE_ICONIC_REPRESENTATION
 #define DWMWA_FORCE_ICONIC_REPRESENTATION 7
 #endif
-		bool r = SUCCEEDED(proc(app, DWMWA_FORCE_ICONIC_REPRESENTATION, &val, sizeof(val)));
-
-		if (hmod) ::FreeLibrary(hmod);
-		return r;
+		return SUCCEEDED(WindowEx::SetDwmWindowAttribute(app, DWMWA_FORCE_ICONIC_REPRESENTATION, val));
 	}
 
 
 	static tjs_int getDoubleClickTime() { return (tjs_int)::GetDoubleClickTime(); }
+
+	// SetThreadDpiAwarenessContextラッパー
+	static tTVInteger setThreadDpiAwarenessContext(tTVInteger context) {
+		static bool lastFailed = false;
+		if (lastFailed) return false;
+
+		typedef HANDLE (WINAPI *SetThreadDpiAwarenessContextT)(HANDLE context);
+		SetThreadDpiAwarenessContextT proc =
+			(SetThreadDpiAwarenessContextT)::GetProcAddress(::GetModuleHandleW(L"user32.dll"), "SetThreadDpiAwarenessContext");
+
+		if (!proc) {
+			TVPAddImportantLog(TJS_W("SetThreadDpiAwarenessContext not found."));
+			lastFailed = true;
+			return false;
+		}
+		
+		return reinterpret_cast<tTVInteger>(proc(reinterpret_cast<HANDLE>(context)));
+	}
+
+	// System.findWindowEx(winname=void, clsname=void, parwin=void, childafter=void);
+	static tjs_error TJS_INTF_METHOD findWindowEx(tTJSVariant *r, tjs_int n, tTJSVariant **p, iTJSDispatch2 *obj) {
+		HWND hWndParent = NULL, hWndChildAfter = NULL;
+		LPCWSTR lpszClass = NULL, lpszWindow = NULL;
+		if (n > 0 && p[0]->Type() == tvtString) lpszWindow     = (LPCWSTR)p[0]->GetString();
+		if (n > 1 && p[1]->Type() == tvtString) lpszClass      = (LPCWSTR)p[1]->GetString();
+		if (n > 2 && p[2]->Type() != tvtVoid)   hWndParent     = _GetHWND(p[2]);
+		if (n > 3 && p[3]->Type() != tvtVoid)   hWndChildAfter = _GetHWND(p[3]);
+		HWND hwnd = ::FindWindowEx(hWndParent, hWndChildAfter, lpszClass, lpszWindow);
+		if (r) *r = (tTVInteger)hwnd;
+		return TJS_S_OK;
+	}
+	static inline HWND _GetHWND(tTJSVariant *v) {
+		return v->Type() == tvtObject ? WindowEx::GetHWND(v->AsObjectNoAddRef()) : (HWND)v->AsInteger();
+	}
+	// System.loadCursor(idc_or_res, hmodule=void)
+	static tjs_error TJS_INTF_METHOD loadCursor(tTJSVariant *r, tjs_int n, tTJSVariant **p, iTJSDispatch2 *obj) {
+		if (n < 1) return TJS_E_BADPARAMCOUNT;
+		HCURSOR handle = 0;
+		HINSTANCE module = NULL;
+		if (n > 1) module = (HINSTANCE)p[1]->AsInteger();
+		if (p[0]->Type() == tvtString) {
+			handle = ::LoadCursorW(module, (LPCWSTR)p[0]->GetString());
+		} else {
+			tTVInteger num = p[0]->AsInteger();
+			LPCWSTR res = NULL;
+			if (num >= 0) res = MAKEINTRESOURCEW(num);
+			else switch ((int)num) {
+			default:
+			case -2:  res = IDC_ARROW;    break; // crArrow
+			case -3:  res = IDC_CROSS;    break; // crCross
+			case -4:  res = IDC_IBEAM;    break; // crIBeam [MEMO] crHBeamはシステムカーソルではない
+			case -5:  res = IDC_SIZE;     break; // crSize
+			case -6:  res = IDC_SIZENESW; break; // crSizeNESW
+			case -7:  res = IDC_SIZENS;   break; // crSizeNS
+			case -8:  res = IDC_SIZENWSE; break; // crSizeNWSE
+			case -9:  res = IDC_SIZEWE;   break; // crSizeWE
+			case -10: res = IDC_UPARROW;  break; // crUpArrow
+			case -11: res = IDC_WAIT;     break; // crHourGlass
+				// crDrag, crNoDrop, crHSplit, crVSplit, crMultiDrag, crSQLWait, 
+			case -18: res = IDC_NO;       break; // crNo
+			//case -19: res = IDC_ARROW;    break; // crAppStart
+			case -20: res = IDC_HELP;     break; // crHelp
+			case -21: res = IDC_HAND;     break; // crHandPoint
+			case -22: res = IDC_SIZEALL;  break; // crSizeAll
+			}
+			handle = ::LoadCursorW(module, res);
+		}
+		if (r) *r = (tTVInteger)handle;
+		return TJS_S_OK;
+	}
+	// System.classLongPtr(win, key, setvalue_or_getasvoid=void);
+	static tjs_error TJS_INTF_METHOD classLongPtr(tTJSVariant *r, tjs_int n, tTJSVariant **p, iTJSDispatch2 *obj) {
+		if (n < 2) return TJS_E_BADPARAMCOUNT;
+		HWND hwnd = _GetHWND(p[0]);
+		ttstr key(*p[1]);
+		int index = 0;
+		key.ToUppserCase();
+		if      (key == TJS_W("CURSOR"))       index = GCLP_HCURSOR;
+		else if (key == TJS_W("ICON"))         index = GCLP_HICON;
+		else if (key == TJS_W("ICONSM"))       index = GCLP_HICONSM;
+		else if (key == TJS_W("BRBACKGROUND")) index = GCLP_HBRBACKGROUND;
+		if (index != 0) {
+			LONG_PTR ptr = 0;
+			tTJSVariantType type = (n > 2) ? p[2]->Type() : tvtVoid;
+			if (type != tvtVoid) {
+				LONG_PTR set = 0;
+				if (index == GCLP_HBRBACKGROUND && type == tvtString) {
+					// [XXX] StockObjectのブラシ参照
+					int brush = -1;
+					key = *p[2];
+					key.ToUppserCase();
+					if      (key == TJS_W("BLACK"))  brush = BLACK_BRUSH;
+					else if (key == TJS_W("WHITE"))  brush = WHITE_BRUSH;
+					else if (key == TJS_W("GRAY"))   brush = GRAY_BRUSH;
+					else if (key == TJS_W("LTGRAY")) brush = LTGRAY_BRUSH;
+					else if (key == TJS_W("DKGRAY")) brush = DKGRAY_BRUSH;
+					if (brush >= 0) set = (LONG_PTR)::GetStockObject(brush);
+					else set = (LONG_PTR)p[2]->AsInteger();
+				} else {
+					set = (LONG_PTR)p[2]->AsInteger();
+				}
+				ptr = ::SetClassLongPtrW(hwnd, index, set);
+			} else {
+				ptr = ::GetClassLongPtrW(hwnd, index);
+			}
+			if (r) *r = (tTVInteger)ptr;
+		} else {
+			if (r) r->Clear();
+		}
+		return TJS_S_OK;
+	}
+	// System.mapVirtualKey(code, maptype)
+	static tjs_uint mapVirtualKey(tjs_int code, tjs_int maptype) {
+		return (tjs_uint)::MapVirtualKeyA((UINT)code, (UINT)maptype);
+	}
 };
 HICON System::externalIcon = NULL;
 // Window.setWindowIconでwithapp=trueとしたとき
@@ -2124,6 +2479,11 @@ NCB_ATTACH_FUNCTION(expandEnvString,    System, System::expandEnvString);
 NCB_ATTACH_FUNCTION(setApplicationIcon, System, System::setApplicationIcon);
 NCB_ATTACH_FUNCTION(setIconicPreview,   System, System::setIconicPreview);
 NCB_ATTACH_FUNCTION(getDoubleClickTime, System, System::getDoubleClickTime);
+NCB_ATTACH_FUNCTION(setDpiAwareness,    System, System::setThreadDpiAwarenessContext);
+NCB_ATTACH_FUNCTION(findWindowEx,       System, System::findWindowEx);
+NCB_ATTACH_FUNCTION(classLongPtr,       System, System::classLongPtr);
+NCB_ATTACH_FUNCTION(loadCursor,         System, System::loadCursor);
+NCB_ATTACH_FUNCTION(mapVirtualKey,      System, System::mapVirtualKey);
 NCB_ATTACH_FUNCTION(breathe,            System, TVPBreathe);
 NCB_ATTACH_FUNCTION(isBreathing,        System, TVPGetBreathing);
 NCB_ATTACH_FUNCTION(clearGraphicCache,  System, TVPClearGraphicCache);
@@ -2180,6 +2540,36 @@ NCB_ATTACH_FUNCTION(setEvalErrorLog, Scripts, Scripts::setEvalErrorLog);
 
 static void PreRegistCallback()
 {
+	IsKirikiri2 = CheckKirikiri2();
+	// 吉里吉里Z対策
+	if (!IsKirikiri2) {
+		tTJSVariant v;
+		// ダミーのPadを追加
+		const tjs_char *pad = TJS_W("Pad");
+		if (!GetGlobalRecursive(pad, v)) {
+			iTJSDispatch2 *obj = TJSCreateCustomObject();
+			TVPRegisterGlobalObject(pad, obj);
+			obj->Release();
+		}
+		// ダミーのMenuItemを追加
+		const tjs_char *menuitem = TJS_W("MenuItem");
+		if (!GetGlobalRecursive(menuitem, v)) {
+			iTJSDispatch2 *obj = TJSCreateCustomObject();
+			TVPRegisterGlobalObject(menuitem, obj);
+			obj->Release();
+			TVPAddImportantLog(TJS_W("MenuItemがありません: この後でmenu.dllを読み込むと本プラグインの拡張が上書きされてしまいます"));
+		}
+		// ダミーのDebug.consoleを追加
+		if(!GetGlobalRecursive(TJS_W("Debug.console"), v) &&
+			GetGlobalRecursive(TJS_W("Debug"), v))
+		{
+			tTJSVariantClosure clo(v.AsObjectNoAddRef());
+			iTJSDispatch2 *obj = TJSCreateCustomObject();
+			v = tTJSVariant(obj, obj);
+			obj->Release();
+			clo.PropSet(TJS_IGNOREPROP, TJS_W("console"), NULL, &v, NULL);
+		}
+	}
 	Scripts::Regist();
 }
 
@@ -2187,6 +2577,7 @@ static void PostUnregistCallback()
 {
 	Scripts::UnRegist();
 	System::termExternalIcon();
+	WindowEx::FreeDwmAPI();
 }
 NCB_PRE_REGIST_CALLBACK(      PreRegistCallback);
 NCB_POST_UNREGIST_CALLBACK(PostUnregistCallback);
