@@ -4,6 +4,13 @@
 
 /**
  * Window拡張
+ *
+ * ※本体の Window にも、最大化 / 最小化 / 復帰 (maximize / minimize / showRestore /
+ *   maximized / minimized)、矩形 (getWindowRect / getClientRect / setClientRect /
+ *   getNormalRect)、disableResize / disableMove、registerExEvent / registerDeviceChange
+ *   と拡張イベントが入っています (SDL3 系ビルドでも利用可)。
+ *   本プラグインを読み込むと、これらはプラグイン版で上書きされます。
+ *   新しく書くスクリプトは本体版を前提にしてください。
  */
 class Window {
 	/**
@@ -135,6 +142,8 @@ class Window {
 
 	/**
 	 * ■拡張イベント：最大化を許可するかどうか確認
+	 * ※本体版は止め方が異なります。本体版は super.onMaximizeQuery(false) を呼ぶと止まり、
+	 *   戻り値は見ません ([Window.onMaximizeQuery](Window.md#onmaximizequery) を参照)。
 	 * @return true を返すと最大化を許可しない
 	 */
 	function onMaximizeQuery();
@@ -526,6 +535,10 @@ class Pad {
 
 /**
  * @description System拡張
+ *
+ * ※本体の System にも getMonitorInfo / getDisplayMonitors / breathe /
+ *   readEnvValue / expandEnvString (WINVER / SDL3 系) と getSystemMetrics (WINVER) が
+ *   入っています。本プラグインを読み込むと、これらはプラグイン版で上書きされます。
  */
 class System
 {
