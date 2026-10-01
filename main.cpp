@@ -19,6 +19,25 @@
 #define TVP_WM_ACQUIREIMECONTROL    (WM_USER + 5)
 #endif
 
+// WINDOWEX_BUNDLE … PackinOneWin32 へ取り込むときの切り替え
+//   (src/packinoneWin32/CMakeLists.txt が 1 を定義する。単体 DLL では 0 = 従来どおり)
+//   - 吉里吉里Z 専用。吉里吉里2 の判定をしない (取り付け先のダミーを必ず作る)
+//   - Debug.console / Pad / Scripts の拡張を外す
+//   - 本体 (krkrz) が持つメンバは IF_MISSING で登録し、本体を上書きしない
+//   - 本体も発火するイベントは発火させない (二重発火と WM_DEVICECHANGE の握りつぶしを防ぐ)。
+//     ⚠ WM_HOTKEY は残す: 本体の Window に registerHotKey は無く (本体は System.registerHotKey)、
+//     Window.registerHotKey / onHotKeyPressed はこのプラグインのものが使われる
+#ifndef WINDOWEX_BUNDLE
+#define WINDOWEX_BUNDLE 0
+#endif
+#if WINDOWEX_BUNDLE
+# define WEX_RAWCALLBACK_CORE RawCallbackIfMissing
+# define WEX_METHOD_CORE      MethodIfMissing
+#else
+# define WEX_RAWCALLBACK_CORE RawCallback
+# define WEX_METHOD_CORE      Method
+#endif
+
 // イベント名一覧
 #define EXEV_MINIMIZE  TJS_W("onMinimize")
 #define EXEV_MAXIMIZE  TJS_W("onMaximize")
@@ -77,6 +96,12 @@ static bool GetGlobalRecursive(const ttstr &name, tTJSVariant &result) {
 	return true;
 }
 static bool CheckKirikiri2() {
+#if WINDOWEX_BUNDLE
+	// ⚠ 吉里吉里Z にも Window.PassThroughDrawDevice があり、下の判定は吉里吉里2 と誤認する。
+	//   その結果 取り付け先のダミーが作られず、MenuItem が無いと ncbind の登録が止まって
+	//   Window 拡張まで消えていた。詰め合わせは吉里吉里Z 専用なので判定しない
+	return false;
+#endif
 	// 吉里吉里2 かどうかを Window.PassThroughDrawDevice の有無で判定する
 	tTJSVariant dd;
 	return GetGlobalRecursive(TJS_W("Window.PassThroughDrawDevice"), dd) && (dd.Type() == tvtObject);
@@ -91,7 +116,17 @@ struct WindowEx
 
 	// ネイティブインスタンスポインタを取得
 	static inline WindowEx * GetInstance(iTJSDispatch2 *obj) {
-		return ncbInstanceAdaptor<WindowEx>::GetNativeInstance(obj);
+		WindowEx *self = ncbInstanceAdaptor<WindowEx>::GetNativeInstance(obj);
+#if WINDOWEX_BUNDLE
+		// 単体版は registerExEvent (インスタンスを作るフック経由) が最初に呼ばれる前提だった。
+		// 詰め合わせでは registerExEvent が本体側なので、ここで作らないと
+		// setMessageHook 等の静的メソッドが TJS_E_ACCESSDENYED になる
+		if (!self && obj) {
+			self = new WindowEx(obj);
+			if (!ncbInstanceAdaptor<WindowEx>::SetAdaptorWithNativeInstance(obj, self)) { delete self; self = NULL; }
+		}
+#endif
+		return self;
 	}
 
 	// ウィンドウハンドルを取得
@@ -460,6 +495,10 @@ struct WindowEx
 		WindowEx *self = GetInstance(obj);
 		if (self == NULL) return TJS_E_ACCESSDENYED;
 		self->enableNCMEvent = !!p[0]->AsInteger();
+#if WINDOWEX_BUNDLE
+		// registerExEvent は本体側なので hasNcMsMove を立てる口が無い。有効化の時に見る
+		if (self->enableNCMEvent) self->hasNcMsMove = self->hasMember(EXEV_NCMSMOVE);
+#endif
 		return TJS_S_OK;
 	}
 
@@ -739,19 +778,23 @@ struct WindowEx
 				}
 			}
 			switch (mes->WParam & 0xFFF0) {
+#if !WINDOWEX_BUNDLE
 			case SC_MAXIMIZE:     return callback(EXEV_QUERYMAX);
+#endif
 			case SC_SCREENSAVE:   return callback(EXEV_SCREENSV);
 			case SC_MONITORPOWER: return callback(EXEV_MONITORPW, (int)mes->LParam, 0);
 			case SC_KEYMENU:      return callback(EXEV_KEYMENU,   (int)mes->LParam, 0);
 			case SC_MOVE: if (disableMove) { mes->Result = 0; return true; } break;
 			}
 			break;
+#if !WINDOWEX_BUNDLE
 		case WM_SIZE:
 			switch (mes->WParam) {
 			case SIZE_MINIMIZED: callback(EXEV_MINIMIZE); break;
 			case SIZE_MAXIMIZED: callback(EXEV_MAXIMIZE); break;
 			}
 			break;
+#endif
 		case WM_SHOWWINDOW:
 			switch (mes->LParam) {
 			case SW_PARENTOPENING: callback(EXEV_SHOW); break;
@@ -761,9 +804,11 @@ struct WindowEx
 		case WM_QUERYOPEN:
 			callback(EXEV_SHOW);
 			break;
+#if !WINDOWEX_BUNDLE
 		case WM_ENTERSIZEMOVE: callback(EXEV_MVSZBEGIN); break;
 		case WM_EXITSIZEMOVE:  callback(EXEV_MVSZEND);   break;
 		case /*WM_DPICHANGED*/0x02E0:    callback(EXEV_DPICHANGE, (int)LOWORD(mes->WParam), (int)HIWORD(mes->WParam)); break;
+#endif
 		case WM_SIZING: if (hasResizing) callback(EXEV_RESIZING, (RECT*)mes->LParam, mes->WParam); break;
 		case WM_MOVING: if (hasMoving)   callback(EXEV_MOVING,   (RECT*)mes->LParam); break;
 		case WM_MOVE:   if (hasMove)     callback(EXEV_MOVE, (int)LOWORD(mes->LParam), (int)HIWORD(mes->LParam)); break;
@@ -825,6 +870,7 @@ struct WindowEx
 			callback(EXEV_EXITMENU);
 			break;
 
+#if !WINDOWEX_BUNDLE // ディスプレイ変更 / デバイス変更は本体が扱う (WM_DEVICECHANGE の握りつぶしも防ぐ)
 			// ディスプレイモード変更通知
 		case WM_DISPLAYCHANGE:
 			callback(EXEV_DISPCHG);
@@ -841,6 +887,7 @@ struct WindowEx
 			}
 			return true; //break;
 
+#endif
 		case WM_HOTKEY:
 			{
 				WORD mod = LOWORD(mes->LParam);
@@ -893,6 +940,7 @@ struct WindowEx
 			hasResizing(false),
 			hasMoving(false),
 			hasMove(false),
+			hasNcMsMove(false),
 			disableResize(false),
 			disableMove(false),
 			enableNCMEvent(false),
@@ -902,6 +950,12 @@ struct WindowEx
 			cachedHWND = GetHWND(self);
 			regist(true);
 			setMessageHookAll(false);
+#if WINDOWEX_BUNDLE
+			// registerExEvent は本体側なので、以前 checkExEvents が立てていた
+			// onNcMouseMove の有無をここで見る (メニューバーの「動的に表示」が使う)。
+			// onResizing / onMoving / onMove は本体が発火するのでここでは立てない
+			hasNcMsMove = hasMember(EXEV_NCMSMOVE);
+#endif
 		}
 
 	~WindowEx() {
@@ -1264,21 +1318,21 @@ NCB_ATTACH_CLASS_WITH_HOOK(WindowEx, Window)
 	Variant(TJS_W("nchtBottomRight"), (tjs_int)HTBOTTOMRIGHT);
 	Variant(TJS_W("nchtBorder"),      (tjs_int)HTBORDER);
 
-	RawCallback(TJS_W("minimize"),            &Class::minimize,          0);
-	RawCallback(TJS_W("maximize"),            &Class::maximize,          0);
+	WEX_RAWCALLBACK_CORE(TJS_W("minimize"),            &Class::minimize,          0);
+	WEX_RAWCALLBACK_CORE(TJS_W("maximize"),            &Class::maximize,          0);
 	RawCallback(TJS_W("maximizeBox"),           &Class::getMaximizeBox,      &Class::setMaximizeBox, 0);
 	RawCallback(TJS_W("minimizeBox"),           &Class::getMinimizeBox,      &Class::setMinimizeBox, 0);
-	RawCallback(TJS_W("maximized"),           &Class::getMaximized,      &Class::setMaximized, 0);
-	RawCallback(TJS_W("minimized"),           &Class::getMinimized,      &Class::setMinimized, 0);
-	RawCallback(TJS_W("showRestore"),         &Class::showRestore,       0);
+	WEX_RAWCALLBACK_CORE(TJS_W("maximized"),           &Class::getMaximized,      &Class::setMaximized, 0);
+	WEX_RAWCALLBACK_CORE(TJS_W("minimized"),           &Class::getMinimized,      &Class::setMinimized, 0);
+	WEX_RAWCALLBACK_CORE(TJS_W("showRestore"),         &Class::showRestore,       0);
 	RawCallback(TJS_W("resetWindowIcon"),     &Class::resetWindowIcon,   0);
 	RawCallback(TJS_W("setWindowIcon"),       &Class::setWindowIcon,     0);
-	RawCallback(TJS_W("getWindowRect"),       &Class::getWindowRect,     0);
-	RawCallback(TJS_W("getClientRect"),       &Class::getClientRect,     0);
-	RawCallback(TJS_W("setClientRect"),       &Class::setClientRect,     0);
-	RawCallback(TJS_W("getNormalRect"),       &Class::getNormalRect,     0);
-	RawCallback(TJS_W("disableResize"),       &Class::getDisableResize,  &Class::setDisableResize, 0);
-	RawCallback(TJS_W("disableMove"),         &Class::getDisableMove,    &Class::setDisableMove, 0);
+	WEX_RAWCALLBACK_CORE(TJS_W("getWindowRect"),       &Class::getWindowRect,     0);
+	WEX_RAWCALLBACK_CORE(TJS_W("getClientRect"),       &Class::getClientRect,     0);
+	WEX_RAWCALLBACK_CORE(TJS_W("setClientRect"),       &Class::setClientRect,     0);
+	WEX_RAWCALLBACK_CORE(TJS_W("getNormalRect"),       &Class::getNormalRect,     0);
+	WEX_RAWCALLBACK_CORE(TJS_W("disableResize"),       &Class::getDisableResize,  &Class::setDisableResize, 0);
+	WEX_RAWCALLBACK_CORE(TJS_W("disableMove"),         &Class::getDisableMove,    &Class::setDisableMove, 0);
 	RawCallback(TJS_W("setOverlayBitmap"),                               &Class::setOverlayBitmap,  0);
 	RawCallback(TJS_W("exSystemMenu"),        &Class::getExSystemMenu,   &Class::setExSystemMenu, 0);
 	RawCallback(TJS_W("resetExSystemMenu"),   &Class::resetExSystemMenu, 0);
@@ -1288,13 +1342,13 @@ NCB_ATTACH_CLASS_WITH_HOOK(WindowEx, Window)
 	RawCallback(TJS_W("setMessageHook"),      &Class::setMessageHook,    0);
 	RawCallback(TJS_W("bringTo"),             &Class::bringTo,           0);
 	RawCallback(TJS_W("sendToBack"),          &Class::sendToBack,        0);
-	RawCallback(TJS_W("registerDeviceChange"),&Class::registerDeviceChange, 0);
-	RawCallback(TJS_W("registerHotKey"),      &Class::registerHotKey, 0);
+	WEX_RAWCALLBACK_CORE(TJS_W("registerDeviceChange"),&Class::registerDeviceChange, 0);
+	WEX_RAWCALLBACK_CORE(TJS_W("registerHotKey"),      &Class::registerHotKey, 0);
 	RawCallback(TJS_W("acquireImeControl"),   &Class::acquireImeControl, 0);
 	RawCallback(TJS_W("resetImeContext"),     &Class::resetImeContext, 0);
 	RawCallback(TJS_W("setWindowCornerPreference"), &Class::setWindowCornerPreference, 0);
 
-	Method(     TJS_W("registerExEvent"),     &Class::checkExEvents);
+	WEX_METHOD_CORE(TJS_W("registerExEvent"),     &Class::checkExEvents);
 	Method(     TJS_W("getNotificationNum"),  &Class::getWindowNotificationNum);
 	Method(     TJS_W("getNotificationName"), &Class::getWindowNotificationName);
 }
@@ -1745,6 +1799,7 @@ void WindowEx::modifySystemMenu() {
 }
 
 
+#if !WINDOWEX_BUNDLE // Debug.console / Pad の拡張は詰め合わせでは外す
 ////////////////////////////////////////////////////////////////
 struct ConsoleEx
 {
@@ -2012,6 +2067,8 @@ NCB_ATTACH_CLASS_WITH_HOOK(PadEx, Pad)
 {
 	Method(     TJS_W("registerExEvent"),     &Class::registerExEvents);
 }
+#endif // !WINDOWEX_BUNDLE
+
 ////////////////////////////////////////////////////////////////
 
 struct System
@@ -2470,6 +2527,7 @@ void WindowEx::_setApplicationIcon(HICON icon) {
 
 
 // Systemに関数を追加
+#if !WINDOWEX_BUNDLE
 NCB_ATTACH_FUNCTION(getDisplayMonitors, System, System::getDisplayMonitors);
 NCB_ATTACH_FUNCTION(getMonitorInfo,     System, System::getMonitorInfo);
 NCB_ATTACH_FUNCTION(getCursorPos,       System, System::getCursorPos);
@@ -2491,7 +2549,41 @@ NCB_ATTACH_FUNCTION(isBreathing,        System, TVPGetBreathing);
 NCB_ATTACH_FUNCTION(clearGraphicCache,  System, TVPClearGraphicCache);
 NCB_ATTACH_FUNCTION(getAboutString,     System, TVPGetAboutString);
 NCB_ATTACH_FUNCTION(getCPUType,         System, TVPGetCPUType);
+#else
+// 詰め合わせでは本体を上書きしないよう、全部 IF_MISSING で登録する
+struct WindowExSystem : public System {
+	static void breathe()            { TVPBreathe(); }
+	static bool isBreathing()        { return TVPGetBreathing(); }
+	static void clearGraphicCache()  { TVPClearGraphicCache(); }
+	static ttstr getAboutString()    { return TVPGetAboutString(); }
+	static tjs_uint32 getCPUType()   { return TVPGetCPUType(); }
+};
+NCB_ATTACH_CLASS(WindowExSystem, System) {
+	RawCallbackIfMissing(TJS_W("getDisplayMonitors"), &Class::getDisplayMonitors, TJS_STATICMEMBER);
+	RawCallbackIfMissing(TJS_W("getMonitorInfo"),     &Class::getMonitorInfo,     TJS_STATICMEMBER);
+	RawCallbackIfMissing(TJS_W("getCursorPos"),       &Class::getCursorPos,       TJS_STATICMEMBER);
+	RawCallbackIfMissing(TJS_W("setCursorPos"),       &Class::setCursorPos,       TJS_STATICMEMBER);
+	RawCallbackIfMissing(TJS_W("setClipCursor"),      &Class::setClipCursor,      TJS_STATICMEMBER);
+	RawCallbackIfMissing(TJS_W("getSystemMetrics"),   &Class::getSystemMetrics,   TJS_STATICMEMBER);
+	RawCallbackIfMissing(TJS_W("readEnvValue"),       &Class::readEnvValue,       TJS_STATICMEMBER);
+	RawCallbackIfMissing(TJS_W("expandEnvString"),    &Class::expandEnvString,    TJS_STATICMEMBER);
+	RawCallbackIfMissing(TJS_W("setApplicationIcon"), &Class::setApplicationIcon, TJS_STATICMEMBER);
+	RawCallbackIfMissing(TJS_W("findWindowEx"),       &Class::findWindowEx,       TJS_STATICMEMBER);
+	RawCallbackIfMissing(TJS_W("classLongPtr"),       &Class::classLongPtr,       TJS_STATICMEMBER);
+	RawCallbackIfMissing(TJS_W("loadCursor"),         &Class::loadCursor,         TJS_STATICMEMBER);
+	MethodIfMissing(TJS_W("setIconicPreview"),   &Class::setIconicPreview);
+	MethodIfMissing(TJS_W("getDoubleClickTime"), &Class::getDoubleClickTime);
+	MethodIfMissing(TJS_W("setDpiAwareness"),    &Class::setThreadDpiAwarenessContext);
+	MethodIfMissing(TJS_W("mapVirtualKey"),      &Class::mapVirtualKey);
+	MethodIfMissing(TJS_W("breathe"),            &Class::breathe);
+	MethodIfMissing(TJS_W("isBreathing"),        &Class::isBreathing);
+	MethodIfMissing(TJS_W("clearGraphicCache"),  &Class::clearGraphicCache);
+	MethodIfMissing(TJS_W("getAboutString"),     &Class::getAboutString);
+	MethodIfMissing(TJS_W("getCPUType"),         &Class::getCPUType);
+}
+#endif
 
+#if !WINDOWEX_BUNDLE // Scripts の拡張は詰め合わせでは外す
 ////////////////////////////////////////////////////////////////
 
 struct Scripts
@@ -2536,6 +2628,7 @@ bool            Scripts::outputErrorLogOnEval = true; // 切り替えフラグ
 // Scriptsに関数を追加
 NCB_ATTACH_FUNCTION(eval,            Scripts, Scripts::eval);
 NCB_ATTACH_FUNCTION(setEvalErrorLog, Scripts, Scripts::setEvalErrorLog);
+#endif
 
 ////////////////////////////////////////////////////////////////
 // コールバック指定
@@ -2546,6 +2639,7 @@ static void PreRegistCallback()
 	// 吉里吉里Z対策
 	if (!IsKirikiri2) {
 		tTJSVariant v;
+#if !WINDOWEX_BUNDLE
 		// ダミーのPadを追加
 		const tjs_char *pad = TJS_W("Pad");
 		if (!GetGlobalRecursive(pad, v)) {
@@ -2553,14 +2647,19 @@ static void PreRegistCallback()
 			TVPRegisterGlobalObject(pad, obj);
 			obj->Release();
 		}
+#endif
 		// ダミーのMenuItemを追加
 		const tjs_char *menuitem = TJS_W("MenuItem");
 		if (!GetGlobalRecursive(menuitem, v)) {
 			iTJSDispatch2 *obj = TJSCreateCustomObject();
 			TVPRegisterGlobalObject(menuitem, obj);
 			obj->Release();
+#if !WINDOWEX_BUNDLE
+			// 詰め合わせでは自前描画メニュー (menu.dll を読まない構成) が普通にあるので出さない
 			TVPAddImportantLog(TJS_W("MenuItemがありません: この後でmenu.dllを読み込むと本プラグインの拡張が上書きされてしまいます"));
+#endif
 		}
+#if !WINDOWEX_BUNDLE
 		// ダミーのDebug.consoleを追加
 		if(!GetGlobalRecursive(TJS_W("Debug.console"), v) &&
 			GetGlobalRecursive(TJS_W("Debug"), v))
@@ -2571,13 +2670,18 @@ static void PreRegistCallback()
 			obj->Release();
 			clo.PropSet(TJS_IGNOREPROP, TJS_W("console"), NULL, &v, NULL);
 		}
+#endif
 	}
+#if !WINDOWEX_BUNDLE
 	Scripts::Regist();
+#endif
 }
 
 static void PostUnregistCallback()
 {
+#if !WINDOWEX_BUNDLE
 	Scripts::UnRegist();
+#endif
 	System::termExternalIcon();
 	WindowEx::FreeDwmAPI();
 }
